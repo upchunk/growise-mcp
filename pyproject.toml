@@ -1,0 +1,14 @@
+[project]
+name = "growise-mcp"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "beautifulsoup4>=4.13.4",
+    "fastmcp>=2.2.5",
+    "motor>=3.7.0",
+    "opencc>=1.1.9",
+    "requests>=2.32.3",
+    "validators>=0.34.0",
+]
