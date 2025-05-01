@@ -1,32 +1,29 @@
 import asyncio
-from datetime import datetime, timezone
+import json
 import re
+import traceback
+from datetime import datetime, timezone
 from typing import Literal
 
 import opencc
 import requests
 from bs4 import BeautifulSoup
 from fastmcp import FastMCP
-from motor.motor_asyncio import AsyncIOMotorClient
 from validators.url import url as is_valid_url
 from validators.utils import ValidationError as ValidatorsError
 
-from settings import MONGO_DB, MONGO_URI
+from utils.generics import get_workflow_items, mongo_client, recursive_fix
 from utils.serper import GoogleSerperAPIWrapper
 
 mcp = FastMCP("growise-mcp", host="0.0.0.0", port=6969)
-
-
-def mongo_client():
-    client = AsyncIOMotorClient(MONGO_URI)
-    return client.get_database(MONGO_DB)
 
 
 _CONVERTERS = opencc.OpenCC("s2tw.json")
 
 
 @mcp.tool()
-def normalize_traditional_chinese(chinese_text: str) -> str:
+def normalize_traditional_chinese(chinese_text: str, **kwargs) -> str:
+    del kwargs
     """
     Normalize Chinese text to Taiwan Standard Traditional Chinese.
 
@@ -51,7 +48,9 @@ async def google_search(
     query_str: str,
     search_type: Literal["news", "search", "places", "images"] = "search",
     raw: bool = False,
+    **kwargs,
 ) -> tuple[dict | str, int]:
+    del kwargs
     """
     Perform an asynchronous Google search using the provided query string and search type
     to obtain relevant and up-to-date search results.
@@ -78,7 +77,8 @@ async def google_search(
 
 
 @mcp.tool()
-def is_url_accessible(url: str):
+def is_url_accessible(url: str, **kwargs):
+    del kwargs
     try:
         response = requests.head(url, allow_redirects=True, timeout=5)
         return response.status_code == 200
@@ -87,7 +87,8 @@ def is_url_accessible(url: str):
 
 
 @mcp.tool()
-def validate_urls(url_list: list[str]) -> list[str]:
+def validate_urls(url_list: list[str], **kwargs) -> list[str]:
+    del kwargs
     """Validate URLs before returning them to the user.
 
     This function **must always be used** whenever a URL is present in the response or context,
@@ -112,7 +113,8 @@ def validate_urls(url_list: list[str]) -> list[str]:
 
 
 @mcp.tool()
-def get_current_datetime():
+def get_current_datetime(**kwargs):
+    del kwargs
     """Returns the current UTC date and time in ISO 8601 format.
 
     Returns:
@@ -144,8 +146,9 @@ async def test_selector(selector: str, soup: BeautifulSoup):
 
 @mcp.tool()
 async def validate_css_selectors(
-    selectors: list[str], html: str
+    selectors: list[str], html: str, **kwargs
 ) -> dict[str, bool] | str:
+    del kwargs
     soup = BeautifulSoup(html, "html5lib")
     escape_regex = re.compile(r"/\*.*?\*/")
     """
@@ -167,6 +170,217 @@ async def validate_css_selectors(
         return {k: v for k, v in zip(selectors, results)}
     except Exception as e:
         return f"Error during validation: {str(e)}"
+
+
+@mcp.tool()
+async def workflow_saver(
+    workflow_title: str,
+    comment: str,
+    workflow_inputs: list[dict] = None,
+    workflow_actions: list[dict] = None,
+    workflow_id: str = None,
+    group_id: str = None,
+    user_id: str = None,
+) -> str:
+    """
+    Asynchronously validates and saves (or updates) a workflow in the database.
+
+    Args:
+        workflow_title (str): The title of the workflow.
+        comment (str): A summary of the changes.
+        workflow_inputs (list[dict]): Pre-validated workflow inputs.
+        workflow_actions (list[dict]): Pre-validated workflow actions.
+        workflow_id (str): The ID of the workflow to save or update.
+        group_id (str): The ID of the group associated with the workflow.
+        user_id (str): The ID of the user associated with the workflow.
+
+    Returns:
+        str: A status message indicating whether the workflow was saved, updated, or remained unchanged.
+            If saving fails, an error message is returned.
+    """
+
+    # Validate input identifiers
+    if not all(
+        isinstance(v, str) and v.strip() for v in [workflow_id, group_id, user_id]
+    ):
+        raise ValueError(
+            "workflow_id, group_id, and user_id must be non-empty strings."
+        )
+
+    # Predefine Mongo filter
+    mongo_filter = {
+        "workflow_id": workflow_id,
+        "group_id": group_id,
+        "user_id": user_id,
+    }
+
+    # Input validation - early returns for invalid inputs
+    if not isinstance(workflow_actions, list) or not workflow_actions:
+        return "Error: workflow_actions must be a non-empty list."
+    if not isinstance(workflow_inputs, list) or not workflow_inputs:
+        return "Error: workflow_inputs must be a non-empty list."
+    if not isinstance(workflow_title, str) or not workflow_title.strip():
+        return "Error: workflow_title must be a non-empty string."
+    if not isinstance(comment, str) or not comment.strip():
+        return "Error: comment must be a non-empty string."
+
+    try:
+        # Fetch available action definitions
+        action_items = await get_workflow_items()
+        available_action_map = {item["action_code"]: item for item in action_items}
+
+        action_map = {}
+
+        # Validate and clean workflow actions
+        for action in workflow_actions:
+            action_code = action.get("action_code")
+            if not action_code:
+                return "Error: Missing action_code in workflow_actions."
+
+            # Match action_code with available actions
+            matching_actions = [
+                v for k, v in available_action_map.items() if action_code.startswith(k)
+            ]
+
+            if not matching_actions:
+                return f"Error: Invalid or unavailable action_code '{action_code}'."
+
+            ref_action = matching_actions[-1]  # Use the closest matching action
+            ref_action_inputs = ref_action.get("input_fields", {})
+
+            # Validate required inputs
+            action_input = action.get("input", {})
+            missing_inputs = [
+                k
+                for k, v in ref_action_inputs.items()
+                if v.get("required") and k not in action_input
+            ]
+
+            if missing_inputs:
+                return f"Error: Missing required inputs {str(missing_inputs)} for action '{action_code}'."
+
+            # Clean action inputs
+            action["input"] = {k: recursive_fix(v) for k, v in action_input.items()}
+
+            # Store validated actions
+            action_map[action_code] = action
+
+        # Validate workflow inputs
+        validated_inputs = []
+        for input_item in workflow_inputs:
+            action_code = input_item.get("action_code")
+            input_name = input_item.get("name")
+            if not action_code or not input_name:
+                return "Error: Missing 'action_code' or 'name' in workflow_inputs."
+
+            action = action_map.get(action_code)
+            if not action:
+                available_actions = ", ".join(action_map.keys())
+                return (
+                    f"Error: Invalid 'workflow_actions' action_code for '#{input_name}' input. "
+                    f"Available actions [{available_actions}]"
+                )
+
+            # Validate input references
+            if f"#{input_name}" not in action["input"].values():
+                return (
+                    f"Error: `#{input_name}` placeholder are not in {action_code} action input.\n"
+                    f"Current {action_code} action Input:\n{json.dumps(action["input"], ensure_ascii=False, indent=2)}"
+                )
+
+            input_item.setdefault("type", "string")
+            validated_inputs.append(input_item)
+
+        # Get current timestamp
+        timestamp = datetime.now(tz=timezone.utc).isoformat()
+
+        # Fetch existing workflow data
+        raw_workflow_collection = mongo_client().get_collection("raw_workflow_actions")
+        prev_data = (
+            await raw_workflow_collection.find_one(
+                mongo_filter,
+                projection={
+                    "workflow_inputs": 1,
+                    "workflow_actions": 1,
+                    "history": 1,
+                },
+            )
+            or {}
+        )
+
+        prev_inputs, prev_actions = prev_data.get("workflow_inputs", []), prev_data.get(
+            "workflow_actions", []
+        )
+        actions_to_save = list(action_map.values())
+
+        # Skip update if no changes detected
+        if prev_inputs == validated_inputs and prev_actions == actions_to_save:
+            return f"No changes detected for workflow '{workflow_id}'."
+
+        # Update history (limit to 100 entries)
+        history = prev_data.get("history", [])
+        history.append({"timestamp": timestamp, "summary": comment})
+        history = history[-100:]
+
+        # Prepare workflow document
+        workflow_to_save = {
+            "workflow_title": workflow_title.strip(),
+            "workflow_inputs": validated_inputs,
+            "workflow_actions": actions_to_save,
+            "timestamp": timestamp,
+            "history": history,
+            **mongo_filter,
+        }
+
+        # Save workflow
+        raw_workflow_collection = mongo_client().get_collection("raw_workflow_actions")
+        update_result = await raw_workflow_collection.update_one(
+            mongo_filter, {"$set": workflow_to_save}, upsert=True
+        )
+
+        if update_result.modified_count > 0 or update_result.upserted_id:
+            return f"Workflow '{workflow_id}' saved successfully."
+
+        return f"No changes were made to workflow '{workflow_id}'."
+
+    except asyncio.CancelledError:
+        raise  # Allow task cancellation to propagate
+
+    except Exception as e:
+        return f"Error: Failed to save workflow '{workflow_id}'. {str(e)}\n{traceback.format_exc()}"
+
+
+@mcp.tool()
+async def workflow_loader(
+    workflow_id: str = None,
+    group_id: str = None,
+    user_id: str = None,
+) -> dict | None:
+    """
+    Asynchronously checks and loads an existing workflow from the database.
+
+    Args:
+        workflow_id (str): The ID of the workflow to save or update.
+        group_id (str): The ID of the group associated with the workflow.
+        user_id (str): The ID of the user associated with the workflow.
+
+    Returns:
+        dict | None: The workflow details if found; otherwise, None.
+    """
+
+    # Retrieve workflow actions from the database if not provided
+    if workflow_id:
+        raw_workflow_collection = mongo_client().get_collection("raw_workflow_actions")
+        workflow: dict = await raw_workflow_collection.find_one(
+            {
+                "workflow_id": workflow_id,
+                "group_id": group_id,
+                "user_id": user_id,
+            }
+        )
+        if workflow:
+            workflow.pop("_id")
+            return workflow
 
 
 if __name__ == "__main__":
