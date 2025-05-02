@@ -8,7 +8,7 @@ from typing import Literal
 import opencc
 import requests
 from bs4 import BeautifulSoup
-from fastmcp import FastMCP
+from fastmcp import FastMCP, Context
 from validators.url import url as is_valid_url
 from validators.utils import ValidationError as ValidatorsError
 
@@ -22,8 +22,7 @@ _CONVERTERS = opencc.OpenCC("s2tw.json")
 
 
 @mcp.tool()
-def normalize_traditional_chinese(chinese_text: str, **kwargs) -> str:
-    del kwargs
+def normalize_traditional_chinese(chinese_text: str, ctx: Context, **kwargs) -> str:
     """
     Normalize Chinese text to Taiwan Standard Traditional Chinese.
 
@@ -40,6 +39,11 @@ def normalize_traditional_chinese(chinese_text: str, **kwargs) -> str:
     Returns:
         str: Text normalized to Taiwan Standard Traditional Chinese.
     """
+
+    print(ctx.model_dump())
+    print(kwargs)
+    del kwargs
+
     return _CONVERTERS.convert(chinese_text)
 
 
@@ -48,9 +52,9 @@ async def google_search(
     query_str: str,
     search_type: Literal["news", "search", "places", "images"] = "search",
     raw: bool = False,
+    ctx: Context = None,
     **kwargs,
 ) -> tuple[dict | str, int]:
-    del kwargs
     """
     Perform an asynchronous Google search using the provided query string and search type
     to obtain relevant and up-to-date search results.
@@ -64,7 +68,10 @@ async def google_search(
         tuple[dict | str, int] : A dictionary or string containing the search results and the credits usage
     """
 
-    search = GoogleSerperAPIWrapper(type=search_type)
+    print(ctx.model_dump())
+    print(kwargs)
+
+    search = GoogleSerperAPIWrapper(type=search_type, **kwargs)
     results = await search.aresults(query_str)
     credits = results.get("credits")
 
@@ -76,9 +83,7 @@ async def google_search(
     return results, credits
 
 
-@mcp.tool()
-def is_url_accessible(url: str, **kwargs):
-    del kwargs
+def is_url_accessible(url: str):
     try:
         response = requests.head(url, allow_redirects=True, timeout=5)
         return response.status_code == 200
@@ -87,8 +92,7 @@ def is_url_accessible(url: str, **kwargs):
 
 
 @mcp.tool()
-def validate_urls(url_list: list[str], **kwargs) -> list[str]:
-    del kwargs
+def validate_urls(url_list: list[str], ctx: Context, **kwargs) -> list[str]:
     """Validate URLs before returning them to the user.
 
     This function **must always be used** whenever a URL is present in the response or context,
@@ -100,6 +104,9 @@ def validate_urls(url_list: list[str], **kwargs) -> list[str]:
     Returns:
         list[str]: A list of validated URLs.
     """
+    print(ctx.model_dump())
+    print(kwargs)
+    del kwargs
 
     validated_urls: list[str] = []
     for url in url_list:
@@ -113,13 +120,16 @@ def validate_urls(url_list: list[str], **kwargs) -> list[str]:
 
 
 @mcp.tool()
-def get_current_datetime(**kwargs):
-    del kwargs
+def get_current_datetime(ctx: Context, **kwargs):
     """Returns the current UTC date and time in ISO 8601 format.
 
     Returns:
         str: The current UTC date and time in ISO format (YYYY-MM-DDTHH:MM:SSZ).
     """
+    print(ctx.model_dump())
+    print(kwargs)
+    del kwargs
+
     return datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
 
 
@@ -146,11 +156,8 @@ async def test_selector(selector: str, soup: BeautifulSoup):
 
 @mcp.tool()
 async def validate_css_selectors(
-    selectors: list[str], html: str, **kwargs
+    selectors: list[str], html: str, ctx: Context, **kwargs
 ) -> dict[str, bool] | str:
-    del kwargs
-    soup = BeautifulSoup(html, "html5lib")
-    escape_regex = re.compile(r"/\*.*?\*/")
     """
     Validate generated CSS selectors.
 
@@ -161,6 +168,12 @@ async def validate_css_selectors(
         dict[str, bool] | str: A dictionary mapping each selector to its validation results
         or an error message string if validation fails.
     """
+
+    print(ctx.model_dump())
+    print(kwargs)
+    del kwargs
+    soup = BeautifulSoup(html, "html5lib")
+    escape_regex = re.compile(r"/\*.*?\*/")
 
     selectors = [escape_regex.sub("", selector).strip() for selector in selectors]
 
@@ -181,6 +194,8 @@ async def workflow_saver(
     workflow_id: str = None,
     group_id: str = None,
     user_id: str = None,
+    ctx: Context = None,
+    **kwargs,
 ) -> str:
     """
     Asynchronously validates and saves (or updates) a workflow in the database.
@@ -198,6 +213,10 @@ async def workflow_saver(
         str: A status message indicating whether the workflow was saved, updated, or remained unchanged.
             If saving fails, an error message is returned.
     """
+
+    print(ctx.model_dump())
+    print(kwargs)
+    del kwargs
 
     # Validate input identifiers
     if not all(
@@ -355,6 +374,8 @@ async def workflow_loader(
     workflow_id: str = None,
     group_id: str = None,
     user_id: str = None,
+    ctx: Context = None,
+    **kwargs,
 ) -> dict | None:
     """
     Asynchronously checks and loads an existing workflow from the database.
@@ -368,6 +389,9 @@ async def workflow_loader(
         dict | None: The workflow details if found; otherwise, None.
     """
 
+    print(ctx.model_dump())
+    print(kwargs)
+    del kwargs
     # Retrieve workflow actions from the database if not provided
     if workflow_id:
         raw_workflow_collection = mongo_client().get_collection("raw_workflow_actions")
